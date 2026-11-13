@@ -12,6 +12,10 @@ ACTION_BURST_DISPOSE = "burst.dispose"
 ACTION_GROUP_CREATE = "group.create"
 ACTION_GROUP_UPDATE = "group.update"
 ACTION_GROUP_TRIAL = "group.trial"
+ACTION_RULESET_DRAFT = "ruleset.draft"
+ACTION_RULESET_TRIAL = "ruleset.trial"
+ACTION_RULESET_PUBLISH = "ruleset.publish"
+ACTION_RULESET_PUBLISH_FAILED = "ruleset.publish_failed"
 ACTION_EXPORT_DAILY = "export.daily"
 
 ACTION_LABELS: dict[str, str] = {
@@ -26,5 +30,9 @@ ACTION_LABELS: dict[str, str] = {
     ACTION_GROUP_CREATE: "新建关键词组",
     ACTION_GROUP_UPDATE: "更新关键词组",
     ACTION_GROUP_TRIAL: "召回试算",
+    ACTION_RULESET_DRAFT: "保存规则草稿",
+    ACTION_RULESET_TRIAL: "规则对照预演",
+    ACTION_RULESET_PUBLISH: "发布规则版本",
+    ACTION_RULESET_PUBLISH_FAILED: "规则发布失败",
     ACTION_EXPORT_DAILY: "导出日报",
 }

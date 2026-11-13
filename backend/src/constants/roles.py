@@ -25,6 +25,7 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     "bursts:claim": STAFF_ROLES,
     "bursts:dispose": STAFF_ROLES,
     "groups:trial": STAFF_ROLES,
+    "groups:publish": (ROLE_ADMIN,),
     "export:daily": STAFF_ROLES,
     # 总监动作
     "groups:write": (ROLE_ADMIN,),

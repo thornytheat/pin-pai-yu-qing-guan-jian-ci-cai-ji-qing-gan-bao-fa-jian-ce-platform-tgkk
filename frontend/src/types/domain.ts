@@ -160,6 +160,7 @@ export interface MentionAlertRef {
   count: number
   window_start: string
   status: BurstStatus
+  ruleset_version?: number
 }
 
 export interface MentionDetail extends MentionItem {
@@ -206,6 +207,7 @@ export interface BurstItem {
   disposition_note: string
   disposed_at: string | null
   detection_version: string
+  ruleset_version: number
   thresholds: { z: number; min_count: number }
 }
 
@@ -224,6 +226,7 @@ export interface TrendPoint {
 }
 
 export interface BurstDetail extends BurstItem {
+  ruleset_version_record: { version: number; is_current: boolean; started_at: string } | null
   trend: TrendPoint[]
   audit: AuditEntry[]
   window_mentions: {
@@ -263,6 +266,8 @@ export interface CollectReport {
   scanned: number
   inserted: number
   duplicates: number
+  excluded: number
+  ruleset_versions: Record<string, number>
   duplicate_reasons: Record<string, number>
   distribution: Record<SentimentLabel, number>
   per_source: { code: SourceCode; label: string; count: number }[]
@@ -381,6 +386,10 @@ export interface BootstrapPayload {
     sentiment: { version: string; lexicon: Record<string, number> }
     burst: { version: string }
   }
+  ruleset: {
+    versions: { code: string; version: number }[]
+    max_version: number
+  }
   permissions: Record<string, string[]>
   counts: { mentions: number; bursts: number; groups: number }
   scope: string | null
@@ -393,4 +402,203 @@ export interface DictionaryPayload {
   negators: string[]
   rhetorical: string[]
   sizes: Record<string, number>
+}
+
+/* ---------------------------------------------------------- 规则版本 ---- */
+
+export interface RuleConfig {
+  keywords: string[]
+  synonyms: string[]
+  excludes: string[]
+  z_threshold: number
+  min_count: number
+  enabled: boolean
+}
+
+export interface RuleVersionItem {
+  id: string
+  group_id: string
+  version: number
+  parent_version: number | null
+  is_current: boolean
+  keywords: string[]
+  synonyms: string[]
+  excludes: string[]
+  z_threshold: number
+  min_count: number
+  enabled: boolean
+  content_hash: string
+  started_at: string | null
+  ended_at: string | null
+  eval_day: string
+  published_by_email: string
+  publish_reason: string
+  code?: string
+  name?: string
+  brand_key?: string
+}
+
+export interface RuleDraftItem {
+  group_id: string
+  code: string
+  name: string
+  brand_key: string
+  rule: RuleConfig
+}
+
+export interface RulesetDraft {
+  id: string
+  label: string
+  content_hash: string
+  base_digest: string
+  status: 'draft' | 'published'
+  items: RuleDraftItem[]
+  owner_email: string
+  last_trial: DiffResult | null
+  published_at: string | null
+  published_by_email: string
+  publish_result: PublishResult | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface RuleGroupLive {
+  group_id: string
+  code: string
+  name: string
+  brand_key: string
+  brand_label: string
+  live_version: number
+  live_started_at: string | null
+  live_published_by: string
+  rule: RuleConfig
+}
+
+export interface DiffHitSide {
+  reason: 'matched' | 'retrieved' | 'excluded' | 'not_matched'
+  group_id: string | null
+  code: string | null
+  name: string | null
+  hits: string[]
+  excludes: string[]
+}
+
+export interface DiffRow {
+  external_id: string
+  origin: 'inbox' | 'mention'
+  mention_id: string | null
+  title: string
+  source_code: SourceCode
+  source_label: string
+  brand_key: string
+  published_at: string
+  change: 'added' | 'dropped' | 'excluded' | 'moved' | 'unchanged'
+  sentiment: { label: SentimentLabel; score: number; hits: string[] }
+  old: DiffHitSide
+  new: DiffHitSide
+}
+
+export interface DiffCompare {
+  added: number
+  dropped: number
+  excluded: number
+  moved: number
+  unchanged: number
+}
+
+export interface DiffBurstEvent {
+  group_id: string
+  code: string
+  name: string
+  window_start: string
+  count: number
+  z_score: number
+  level: BurstLevel
+  baseline_mean: number
+}
+
+export interface DiffResult {
+  draft_id: string | null
+  content_hash: string
+  base_digest: string
+  batch: { total: number; trial_or_inbox: number; stored: number; note: string }
+  compare: DiffCompare
+  rows: DiffRow[]
+  trial: { rows: DiffRow[]; compare: DiffCompare }
+  mentions: { rows: DiffRow[]; compare: DiffCompare }
+  sentiment: {
+    old: Record<string, number>
+    new: Record<string, number>
+    changed_rows: DiffRow[]
+    note: string
+  }
+  burst: {
+    old: { eval_day: string | null; events: DiffBurstEvent[]; unknown: unknown[] }
+    new: { eval_day: string | null; events: DiffBurstEvent[]; unknown: unknown[] }
+    rows: { change: 'added' | 'dropped' | 'changed' | 'unchanged'; old: DiffBurstEvent | null; new: DiffBurstEvent | null }[]
+  }
+  rules: { old: RuleRow[]; new: RuleRow[] }
+}
+
+export interface RuleRow {
+  group_id: string
+  code: string
+  name: string
+  keywords: string[]
+  synonyms: string[]
+  excludes: string[]
+  z_threshold: number
+  min_count: number
+  enabled: boolean
+  hash: string
+}
+
+export interface PublishResult {
+  draft_id: string
+  content_hash: string
+  eval_day: string
+  versions: Record<string, number>
+  new_versions: Record<string, number>
+  unchanged_versions: Record<string, number>
+  changed_groups: string[]
+  published_at: string
+  published_by_email: string
+  idempotent: boolean
+  applies_to?: string
+  historical_mentions_preserved?: boolean
+}
+
+export interface RuleAlignInfo {
+  mentions: number
+  attributed: number
+  kept: number
+  stale_attributions: number
+  current_version_ids: string[]
+  alert_versions: number[]
+  aligned: boolean
+}
+
+export interface RulesetOverview {
+  groups: RuleGroupLive[]
+  current_digest: string
+  drafts: RulesetDraft[]
+  alignment: RuleAlignInfo
+  batch: { candidates: number; inbox: number; stored: number; kept: number; excluded: number }
+  eval_day: string
+}
+
+export interface RuleHistory {
+  items: RuleVersionItem[]
+  publishes: {
+    id: string
+    draft_id: string | null
+    content_hash: string
+    outcome: 'published' | 'failed'
+    outcome_text: string
+    versions: Record<string, number>
+    actor_email: string
+    trace_id: string
+    created_at: string | null
+  }[]
+  current_digest: string
 }

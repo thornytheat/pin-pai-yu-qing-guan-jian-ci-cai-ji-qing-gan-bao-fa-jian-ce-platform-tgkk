@@ -33,6 +33,7 @@
 | 08:30 | 值班交接，打开提及流 | 库内 900 条，负面 147 条，负面率 16.3% |
 | 09:10 | 跑一次补采（过去 7 天 05:00–06:59 窗口） | 扫描 92，新增 86，重复 6，库内 986 |
 | 09:20 | 全量重算情感 | 986 条，负面率 15.5% |
+| 09:40 | 改规则：存草稿 → 同批候选对照 → 发布 | `塑料片` 同义词进 coffee-foreign v2，对照显示新增/换组明细后一次性发布 |
 | 10:05 | 复核 5 条待复核负面 | 3 条确认负面，2 条通报体改判中性 |
 | 10:20 | 认领 critical：咖啡-异物 14:00 | z=7.42，量 31 vs 基线 μ=4.86 |
 | 11:00 | 处置 2 个事件（1 已处置 / 1 排除误报） | 备注写入审计 |
@@ -45,6 +46,7 @@
 - **提及流**：时间序列表 + 24 小时情感色带（负/中/正堆叠）+ 来源/情感/复核筛选 + 全文搜索 + 情感分排序。
 - **提及详情**：正文按后端返回的 `offset/length` 高亮证据词（否定命中单独标色），逐词证据表（极性/权重/程度/否定/贡献），同事件关联（同组 ±2 小时），命中的爆发窗口。
 - **关键词组与词典**：12 组关键词的主词/同义词/排除词编辑（admin）、z 阈值与最小量、召回试算（92 条候选上真跑召回率/精度/排除命中）、情感词典只读展示。
+- **规则版本（草稿 → 预演 → 发布）**：修改先存草稿（与线上版本并存，不影响任何口径）；用**同一批候选**（采集窗口原始候选 + 库内提及）逐条对比新旧规则，给出新增 / 漏掉 / 被排除 / 换组，以及情感标签、爆发窗口差异；确认后一次性发布全部改动，失败整体回滚保留原版本；同一草稿重复发布不新建版本、不重复统计；历史预警与历史提及保留原版本。
 - **爆发预警看板**：危急/预警/关注三级 LED 计数、事件列表（z 降序）、逐小时量 vs 7 天同小时基线折线、基线序列、窗口内提及样本、认领与处置。
 - **日报导出**：评估日 Markdown，含情感分布、Top5 负面（含证据词与否定命中）、分组负面率、爆发事件表、高频负面词。
 
@@ -84,7 +86,11 @@ seed 结束会打印一行（键与顺序逐字固定，两次运行必须一致
 
 ```
 SEED_SUMMARY brand=newssweep sources=4 groups=12 mentions=900 bursts=5 users=3
+SEED_RULESET groups=12 max_version=1 attributed=900
 ```
+
+`SEED_SUMMARY` 行保持逐字不变（幂等校验继续用它）；`SEED_RULESET` 行给出规则版本基线：
+12 组各 v1、900 条提及全部有归属行（规则版本口径从第一次启动就已成立）。
 
 收尾：`docker compose down -v --remove-orphans`
 
@@ -118,14 +124,15 @@ SEED_SUMMARY brand=newssweep sources=4 groups=12 mentions=900 bursts=5 users=3
 gb-578/
 ├── backend/
 │   ├── src/{config,constants,controllers,middlewares,models,routes,schemas,services,utils}
+│   │   ├── services/{group_service.py,ruleset_service.py,collect_service.py,...}
 │   │   └── services/analysis/{lexicon.py,sentiment_analyzer.py,burst_detector.py,dedupe.py}
 │   ├── scripts/{bootstrap_db.py,seed_demo.py,fixtures.py}
-│   ├── migrations/{env.py,versions/0001_initial.py}
+│   ├── migrations/{env.py,versions/0001_initial.py,versions/0002_rule_versions.py}
 │   └── Dockerfile / entrypoint.sh / requirements.txt
 ├── worker/src/{config,core,tasks}       # Celery worker + beat + 心跳
 ├── frontend/src/
-│   ├── api/           # 每个实体一个 api 模块
-│   ├── stores/        # auth / meta / mention / group / burst
+│   ├── api/           # 每个实体一个 api 模块（含 ruleset.ts）
+│   ├── stores/        # auth / meta / mention / group / burst / ruleset
 │   ├── types/         # domain.ts 与后端 serialize 字段一一对应
 │   ├── components/{common,domain}
 │   ├── pages/         # Login / Mentions / MentionDetail / Groups / Bursts
@@ -171,16 +178,38 @@ gb-578/
 
 ---
 
-## 8. 四个实体的贯穿路径
+## 8. 规则版本口径（采集 / 归属 / 情感 / 预警同一发布口径）
+
+```
+KeywordGroup（可读快照，供编辑）──发布──▶ RulesetVersion(group_id, version, is_current)
+                                              │
+      采集 run_collection ──用线上规则判定──▶ MentionRuleAttribution(mention, group, kept, reason, version)
+                                              │
+      提及流 / 情感汇总 / 爆发预警 ──只读 kept=True 且 group_id 一致的归属行──▶ 同一版本
+```
+
+| 概念 | 表 / 入口 | 语义 |
+|---|---|---|
+| 线上版本 | `ruleset_versions`（`is_current=true` 每组一行） | 采集、归属、汇总、预警的唯一口径；版本号单调递增 |
+| 草稿 | `ruleset_drafts`（自然键 = 内容哈希） | 线上基线 + 全部组快照；不改线上、不影响采集；同内容重复保存复用同一条 |
+| 对照 | `POST /api/rulesets/drafts/{id}/diff`、`POST /api/rulesets/trial` | 同一批候选新旧两侧逐条比对：added / dropped / excluded / moved + 情感证据 + 爆发事件差异 |
+| 发布 | `POST /api/rulesets/drafts/{id}/publish` | 单事务：全部改动一次性生效；失败 rollback 保留原版本；`content_hash` 已发布 → 幂等返回（不建版本、不重算） |
+| 归属 | `mention_rule_attributions`（1 提及 1 行） | 采集/启动兜底写入；`kept=false` 的条目仍留行以便对账，但不进提及流/汇总/预警 |
+| 历史预警 | `burst_alerts.ruleset_version` + 自然键 `(group_id, window_start, version)` | 新发布只产生新版本事件；旧版本事件与处置状态原样保留，`GET /api/bursts/versions` 按版本归档 |
+
+权限：`groups:trial`（staff，任何人可预演）与 `groups:publish`（仅 admin，一次性发布）分离；发布/失败均写 `ruleset_publish_logs` 与审计（`ruleset.publish` / `ruleset.publish_failed`）。
+
+## 9. 四个实体的贯穿路径
 
 | 实体 | 表 | model | schema | service | controller/route | 前端 api | store | 页面/组件 |
 |---|---|---|---|---|---|---|---|---|
 | `KeywordGroup` | `keyword_groups` | `models/keyword_group.py` | `schemas/group.py` | `services/group_service.py` | `controllers/group_controller.py` → `routes/group.py` | `api/group.ts` | `stores/groupStore.ts` | `pages/GroupsPage.vue` |
+| `RulesetVersion` | `ruleset_versions` | `models/rule_version.py` | `schemas/ruleset.py` | `services/ruleset_service.py` | `controllers/ruleset_controller.py` → `routes/ruleset.py` | `api/ruleset.ts` | `stores/rulesetStore.ts` | `GroupsPage.vue` / `RulesetDiffPanel.vue` |
 | `Mention` | `mentions` | `models/mention.py` | `schemas/mention.py` | `services/mention_service.py` | `mention_controller.py` → `routes/mention.py` | `api/mention.ts` | `stores/mentionStore.ts` | `MentionsPage` / `MentionDetailPage` / `MentionRow.vue` |
 | `SentimentScore` | `sentiment_scores` | `models/sentiment_score.py` | `schemas/mention.py` | `services/sentiment_service.py` + `analysis/sentiment_analyzer.py` | `sentiment_controller.py` → `routes/sentiment.py` | `api/sentiment.ts` | `stores/mentionStore.ts` | `EvidenceText` / `HitTable` / `ScoreGauge` |
 | `BurstAlert` | `burst_alerts` | `models/burst_alert.py` | `schemas/burst.py` | `services/burst_service.py` + `analysis/burst_detector.py` | `burst_controller.py` → `routes/burst.py` | `api/burst.ts` | `stores/burstStore.ts` | `pages/BurstsPage.vue` / `BurstTrend.vue` |
 
-## 9. 枚举出现位置（前后端各一份）
+## 10. 枚举出现位置（前后端各一份）
 
 **后端唯一事实源**：`backend/src/constants/enums.py`
 
@@ -194,7 +223,7 @@ gb-578/
 | `BrandKey`(6 品牌) | `constants/brands.py`、`constants/enums.py`、`services/group_service.py` | `constants/enums.ts`、`stores/metaStore.ts`、`GroupsPage.vue` |
 | `UserRole`(admin/analyst/client) | `constants/roles.py`、`middlewares/rbac.py`、`middlewares/auth.py` | `constants/roles.ts`、`types/user.ts`、`stores/authStore.ts`、`AppShell.vue` |
 
-## 10. 工程附件
+## 11. 工程附件
 
 - 共享前端组件（≥3）：`AppShell`、`PageHeader`、`EmptyState`、`ErrorNotice`、`LedCounter`、`SentimentChip`、`SourceTag`、`LevelTag`、`StatusSeal`（9 个）；业务组件 `MentionRow`、`SentimentBand`、`EvidenceText`、`ScoreGauge`、`BurstTrend`、`HitTable`、`MeterRows`。
   其中 `SentimentChip`（提及流/详情/看板）、`LedCounter`（提及流/看板）、`LevelTag`（看板/详情）、`MeterRows`/`SentimentBand` 多页复用。
@@ -202,6 +231,6 @@ gb-578/
 - 后端中间件（≥2）：`audit_logger`（trace_id + 访问日志）、`timing`（耗时头）、`auth`（JWT）、`rbac`（权限）、`rate_limit`（Redis 滑动窗口）、`error_handler`（统一异常收敛）。
 - 横切关注点：JWT + 三角色、审计日志（`audit_logs` + 详情页审计时间线）、限流（采集 6/min、检测 8/min）+ 全局错误处理。
 
-## 11. License
+## 12. License
 
 MIT（演示项目，语料与品牌均为虚构 fixture）。

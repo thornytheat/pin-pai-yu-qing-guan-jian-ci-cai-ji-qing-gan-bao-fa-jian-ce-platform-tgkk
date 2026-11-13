@@ -29,6 +29,14 @@ def detect(
     return burst_controller.detect(db, user, getattr(request.state, "trace_id", ""))
 
 
+@router.get("/bursts/versions")
+def versioned(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_permission("bursts:read")),
+) -> dict:
+    return burst_controller.versioned(db, user)
+
+
 @router.get("/bursts")
 def list_alerts(
     level: str | None = None,

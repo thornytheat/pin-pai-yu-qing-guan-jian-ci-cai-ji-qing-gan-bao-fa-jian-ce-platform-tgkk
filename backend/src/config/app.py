@@ -31,9 +31,34 @@ def _run_seed_once() -> None:
         logger.warning("[SEED_DEMO] seed failed (ignored): %s", exc)
 
 
+def _backfill_ruleset_once() -> None:
+    """老库升级兜底：给没有规则版本的组建立 v1、给没有归属行的提及补归属。
+
+    幂等且失败不阻塞启动；不改变任何已发布版本或历史预警。
+    """
+    try:
+        from sqlalchemy import select
+
+        from src.config.database import session_scope
+        from src.models.keyword_group import KeywordGroup
+        from src.models.rule_version import RulesetVersion
+        from src.services import ruleset_service
+
+        with session_scope() as db:
+            has_versions = db.execute(select(RulesetVersion.id).limit(1)).first()
+            if has_versions is None and db.execute(select(KeywordGroup.id).limit(1)).first() is None:
+                return
+            created = ruleset_service.seed_versions(db, actor_email="system")
+            stats = ruleset_service.backfill_attributions(db)
+        logger.warning("[RULESET] baseline versions=%s backfill=%s", created, stats)
+    except Exception as exc:  # noqa: BLE001 - 启动阶段不允许阻塞
+        logger.warning("[RULESET] backfill skipped: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _run_seed_once()
+    _backfill_ruleset_once()
     yield
 
 

@@ -28,6 +28,7 @@ from src.constants.sources import SOURCE_CATALOG
 from src.models.burst_alert import BurstAlert
 from src.models.keyword_group import KeywordGroup
 from src.models.mention import Mention
+from src.models.rule_version import RulesetVersion
 from src.models.sentiment_score import SentimentScore
 from src.services.analysis.burst_detector import DETECTION_VERSION
 from src.services.analysis.lexicon import lexicon_size
@@ -100,9 +101,25 @@ def bootstrap(db: Session, brand_scope: str | None) -> dict:
             "sentiment": {"version": ALGORITHM_VERSION, "lexicon": lexicon_size()},
             "burst": {"version": DETECTION_VERSION},
         },
+        "ruleset": _ruleset_meta(db, brand_scope),
         "permissions": {action: list(roles) for action, roles in PERMISSIONS.items()},
         "counts": {"mentions": mention_count, "bursts": burst_count, "groups": len(groups)},
         "scope": brand_scope,
+    }
+
+
+def _ruleset_meta(db: Session, brand_scope: str | None) -> dict:
+    """线上规则版本摘要（前端顶栏/看板展示同一发布口径，不硬编码）。"""
+    rows = db.execute(select(RulesetVersion).where(RulesetVersion.is_current.is_(True))).scalars().all()
+    groups = {str(group.id): group for group in db.execute(select(KeywordGroup)).scalars().all()}
+    versions = [
+        {"code": groups[str(row.group_id)].code, "version": row.version}
+        for row in rows
+        if str(row.group_id) in groups and (not brand_scope or groups[str(row.group_id)].brand_key == brand_scope)
+    ]
+    return {
+        "versions": sorted(versions, key=lambda item: item["code"]),
+        "max_version": max((item["version"] for item in versions), default=0),
     }
 
 

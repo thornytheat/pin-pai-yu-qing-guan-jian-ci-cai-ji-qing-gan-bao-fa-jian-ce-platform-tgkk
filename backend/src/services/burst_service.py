@@ -5,7 +5,7 @@ import time
 from collections import Counter
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from src.config.settings import settings
@@ -20,16 +20,26 @@ from src.constants.log_templates import ACTION_BURST_CLAIM, ACTION_BURST_DETECT,
 from src.models.burst_alert import BurstAlert
 from src.models.keyword_group import KeywordGroup
 from src.models.mention import Mention
+from src.models.rule_version import MentionRuleAttribution, RulesetVersion
 from src.models.sentiment_score import SentimentScore
 from src.models.user import User
 from src.services import audit_service
 from src.services.analysis.burst_detector import DETECTION_VERSION, MentionPoint, detect, trend_series
+from src.services.ruleset_service import to_uuid
 from src.utils.errors import AppError
 from src.utils.timeutil import utcnow
 
 
 def _load_points(db: Session, brand_scope: str | None) -> list[MentionPoint]:
-    stmt = select(Mention.id, Mention.group_id, Mention.brand_key, Mention.published_at, Mention.title, Mention.engagement)
+    """只取「当前发布口径下被保留」的提及（归属版本一致），四个环节同一口径。"""
+    stmt = (
+        select(Mention.id, Mention.group_id, Mention.brand_key, Mention.published_at, Mention.title, Mention.engagement)
+        .join(MentionRuleAttribution, MentionRuleAttribution.mention_id == Mention.id)
+        .where(
+            MentionRuleAttribution.kept.is_(True),
+            MentionRuleAttribution.group_id == Mention.group_id,
+        )
+    )
     if brand_scope:
         stmt = stmt.where(Mention.brand_key == brand_scope)
     return [
@@ -49,7 +59,13 @@ def run_detection(db: Session, user: User, brand_scope: str | None, trace_id: st
     points = _load_points(db, brand_scope)
     group_rows = db.execute(select(KeywordGroup)).scalars().all()
     groups = {str(group.id): group for group in group_rows}
-    thresholds = {gid: (group.z_threshold, group.min_count) for gid, group in groups.items()}
+    current = {
+        str(row.group_id): row
+        for row in db.execute(select(RulesetVersion).where(RulesetVersion.is_current.is_(True))).scalars().all()
+    }
+    thresholds = {
+        gid: (row.z_threshold, row.min_count) for gid, row in current.items() if row.enabled
+    } or {gid: (group.z_threshold, group.min_count) for gid, group in groups.items()}
     result = detect(points, group_thresholds=thresholds)
 
     created = 0
@@ -59,9 +75,13 @@ def run_detection(db: Session, user: User, brand_scope: str | None, trace_id: st
         group = groups.get(event.group_id)
         if group is None:
             continue
+        version_row = current.get(str(group.id))
+        ruleset_version = version_row.version if version_row else 0
         existing = db.execute(
             select(BurstAlert).where(
-                BurstAlert.group_id == group.id, BurstAlert.window_start == event.window_start
+                BurstAlert.group_id == group.id,
+                BurstAlert.window_start == event.window_start,
+                BurstAlert.ruleset_version == ruleset_version,
             )
         ).scalar_one_or_none()
         if existing is None:
@@ -80,6 +100,8 @@ def run_detection(db: Session, user: User, brand_scope: str | None, trace_id: st
                 baseline_series=event.baseline_series,
                 sample_titles=event.sample_titles,
                 detection_version=event.detection_version,
+                ruleset_version=ruleset_version,
+                ruleset_version_id=version_row.id if version_row else None,
             )
             db.add(alert)
             db.flush()
@@ -146,6 +168,13 @@ def list_alerts(
         stmt = stmt.where(BurstAlert.level == level)
     if status:
         stmt = stmt.where(BurstAlert.status == status)
+    # 历史预警保留原版本：只展示每个组「最新规则版本」下产生的事件，旧版本事件归档不混淆。
+    current_rows = db.execute(select(RulesetVersion).where(RulesetVersion.is_current.is_(True))).scalars().all()
+    current_ids = [row.id for row in current_rows]
+    if current_ids:
+        stmt = stmt.where(
+            or_(BurstAlert.ruleset_version_id.in_(current_ids), BurstAlert.ruleset_version_id.is_(None))
+        )
     stmt = stmt.order_by(BurstAlert.z_score.desc(), BurstAlert.window_start.desc()).limit(limit)
     rows = db.execute(stmt).all()
     items = [serialize(alert, group) for alert, group in rows]
@@ -155,6 +184,10 @@ def list_alerts(
     )
     if brand_scope:
         counter_stmt = counter_stmt.where(BurstAlert.brand_key == brand_scope)
+    if current_ids:
+        counter_stmt = counter_stmt.where(
+            or_(BurstAlert.ruleset_version_id.in_(current_ids), BurstAlert.ruleset_version_id.is_(None))
+        )
     by_level: Counter[str] = Counter()
     by_status: Counter[str] = Counter()
     mentions_total = 0
@@ -182,11 +215,37 @@ def list_alerts(
     }
 
 
+def versioned_alerts(db: Session, brand_scope: str | None) -> dict:
+    """历史预警归档：按规则版本列出（旧版本事件保留，不被新发布重写）。"""
+    groups = {str(group.id): group for group in db.execute(select(KeywordGroup)).scalars().all()}
+    stmt = (
+        select(BurstAlert)
+        .where(BurstAlert.ruleset_version_id.is_not(None))
+        .order_by(BurstAlert.ruleset_version.desc(), BurstAlert.window_start.desc())
+    )
+    if brand_scope:
+        stmt = stmt.where(BurstAlert.brand_key == brand_scope)
+    rows = db.execute(stmt).scalars().all()
+    out: dict[int, list[dict]] = {}
+    for alert in rows:
+        group = groups.get(str(alert.group_id))
+        if group is None:
+            continue
+        out.setdefault(alert.ruleset_version, []).append(serialize(alert, group))
+    return {
+        "versions": [
+            {"version": version, "items": items, "count": len(items)}
+            for version, items in sorted(out.items(), reverse=True)
+        ]
+    }
+
+
 def get_alert(db: Session, alert_id: str) -> tuple[BurstAlert, KeywordGroup]:
+    key = to_uuid(alert_id)
     row = db.execute(
         select(BurstAlert, KeywordGroup)
         .join(KeywordGroup, KeywordGroup.id == BurstAlert.group_id)
-        .where(BurstAlert.id == alert_id)
+        .where(BurstAlert.id == key)
     ).first()
     if row is None:
         raise AppError(codes.NOT_FOUND, "预警事件不存在", f"alert_id={alert_id}")
@@ -198,15 +257,24 @@ def detail(db: Session, alert_id: str, brand_scope: str | None) -> dict:
     if brand_scope and alert.brand_key != brand_scope:
         raise AppError(codes.BRAND_SCOPE_DENIED, "该数据不属于你负责的品牌", "brand mismatch")
     payload = serialize(alert, group)
+    version_row = db.get(RulesetVersion, alert.ruleset_version_id) if alert.ruleset_version_id else None
+    payload["ruleset_version_record"] = (
+        {"version": version_row.version, "is_current": version_row.is_current, "started_at": version_row.started_at.isoformat()}
+        if version_row
+        else None
+    )
     day = alert.window_start.date()
     points = _load_points(db, brand_scope)
     payload["trend"] = trend_series(points, str(group.id), day)
     payload["audit"] = audit_service.for_entity(db, "burst_alert", str(alert.id))
+    # 历史预警保留原版本：窗口内样本只取「该预警所属规则版本」下保留的提及。
     mentions = db.execute(
         select(Mention, SentimentScore)
         .join(SentimentScore, SentimentScore.mention_id == Mention.id)
+        .join(MentionRuleAttribution, MentionRuleAttribution.mention_id == Mention.id)
         .where(
-            Mention.group_id == group.id,
+            MentionRuleAttribution.kept.is_(True),
+            MentionRuleAttribution.group_id == group.id,
             Mention.published_at >= alert.window_start,
             Mention.published_at <= alert.window_end,
         )
@@ -337,6 +405,7 @@ def serialize(alert: BurstAlert, group: KeywordGroup) -> dict:
         "baseline_series": alert.baseline_series,
         "sample_titles": alert.sample_titles,
         "claimed_by_email": alert.claimed_by_email,
+        "ruleset_version": alert.ruleset_version,
         "claimed_at": alert.claimed_at.isoformat() if alert.claimed_at else None,
         "disposition_note": alert.disposition_note,
         "disposed_at": alert.disposed_at.isoformat() if alert.disposed_at else None,

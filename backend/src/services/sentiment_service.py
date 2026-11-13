@@ -14,6 +14,7 @@ from src.constants.enums import BRAND_LABELS, REVIEW_STATUS_LABELS, SENTIMENT_LA
 from src.constants.log_templates import ACTION_SENTIMENT_RESCORE
 from src.models.keyword_group import KeywordGroup
 from src.models.mention import Mention
+from src.models.rule_version import MentionRuleAttribution
 from src.models.sentiment_score import SentimentScore
 from src.models.user import User
 from src.services import audit_service
@@ -23,7 +24,12 @@ from src.utils.timeutil import utcnow
 
 def rescore_all(db: Session, user: User, brand_scope: str | None, trace_id: str = "") -> dict:
     started = time.perf_counter()
-    stmt = select(Mention, SentimentScore).join(SentimentScore, SentimentScore.mention_id == Mention.id)
+    stmt = (
+        select(Mention, SentimentScore)
+        .join(SentimentScore, SentimentScore.mention_id == Mention.id)
+        .join(MentionRuleAttribution, MentionRuleAttribution.mention_id == Mention.id)
+        .where(MentionRuleAttribution.kept.is_(True), MentionRuleAttribution.group_id == Mention.group_id)
+    )
     if brand_scope:
         stmt = stmt.where(Mention.brand_key == brand_scope)
     rows = db.execute(stmt).all()
@@ -91,10 +97,24 @@ def summary(db: Session, brand_scope: str | None) -> dict:
     rows = []
     if groups:
         rows = db.execute(
-            select(Mention.group_id, SentimentScore.final_label, SentimentScore.review_status, func.count())
+            select(
+                MentionRuleAttribution.group_id,
+                SentimentScore.final_label,
+                SentimentScore.review_status,
+                func.count(),
+            )
+            .select_from(MentionRuleAttribution)
+            .join(Mention, Mention.id == MentionRuleAttribution.mention_id)
             .join(SentimentScore, SentimentScore.mention_id == Mention.id)
-            .where(Mention.group_id.in_(list(groups.keys())))
-            .group_by(Mention.group_id, SentimentScore.final_label, SentimentScore.review_status)
+            .where(
+                MentionRuleAttribution.kept.is_(True),
+                MentionRuleAttribution.group_id.in_(list(groups.keys())),
+            )
+            .group_by(
+                MentionRuleAttribution.group_id,
+                SentimentScore.final_label,
+                SentimentScore.review_status,
+            )
         ).all()
 
     totals: Counter[str] = Counter()
@@ -155,7 +175,12 @@ def top_evidence_words(db: Session, brand_scope: str | None, limit: int = 12) ->
     stmt = (
         select(SentimentScore.hits)
         .join(Mention, Mention.id == SentimentScore.mention_id)
-        .where(SentimentScore.final_label == "neg")
+        .join(MentionRuleAttribution, MentionRuleAttribution.mention_id == Mention.id)
+        .where(
+            SentimentScore.final_label == "neg",
+            MentionRuleAttribution.kept.is_(True),
+            MentionRuleAttribution.group_id == Mention.group_id,
+        )
     )
     if brand_scope:
         stmt = stmt.where(Mention.brand_key == brand_scope)

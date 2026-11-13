@@ -19,6 +19,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'groups:read': '读取关键词组',
   'groups:write': '编辑关键词组',
   'groups:trial': '召回试算',
+  'groups:publish': '发布规则版本',
   'collect:run': '运行采集',
   'sentiment:rescore': '重算情感',
   'bursts:read': '读取预警',

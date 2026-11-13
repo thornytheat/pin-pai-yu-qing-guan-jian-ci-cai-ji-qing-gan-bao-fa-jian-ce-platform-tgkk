@@ -177,6 +177,7 @@
             <div><dt>扫描</dt><dd class="mono">{{ collectReport.scanned }}</dd></div>
             <div><dt>新增</dt><dd class="mono amber">{{ collectReport.inserted }}</dd></div>
             <div><dt>重复</dt><dd class="mono">{{ collectReport.duplicates }}</dd></div>
+            <div><dt>被排除</dt><dd class="mono">{{ collectReport.excluded }}</dd></div>
             <div><dt>库内总量</dt><dd class="mono">{{ collectReport.total_mentions }}</dd></div>
           </dl>
           <p class="panel__note">{{ collectReport.window_note }}</p>
@@ -316,7 +317,7 @@ async function collect() {
   try {
     const result = await runCollection()
     collectReport.value = result
-    flash.value = `采集完成：扫描 ${result.scanned} · 新增 ${result.inserted} · 重复 ${result.duplicates} · 库内 ${result.total_mentions}`
+    flash.value = `采集完成：扫描 ${result.scanned} · 新增 ${result.inserted} · 重复 ${result.duplicates} · 被排除 ${result.excluded} · 库内 ${result.total_mentions}（规则口径已按线上版本）`
     await Promise.all([reload(), loadSummary(), store.loadQueue()])
     await meta.load(true)
   } catch (error) {

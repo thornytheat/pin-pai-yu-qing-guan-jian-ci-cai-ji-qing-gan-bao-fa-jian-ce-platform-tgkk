@@ -19,6 +19,7 @@ from src.models.user import User
 from src.services import audit_service
 from src.services.analysis.dedupe import hash_key, is_duplicate
 from src.services.analysis.sentiment_analyzer import analyze
+from src.services import ruleset_service
 from src.services.fixtures_loader import inbox_corpus
 from src.utils.timeutil import utcnow
 
@@ -26,6 +27,13 @@ from src.utils.timeutil import utcnow
 def run_collection(db: Session, user: User, trace_id: str = "") -> dict:
     started = time.perf_counter()
     groups = {group.code: group for group in db.execute(select(KeywordGroup)).scalars().all()}
+    # 采集只认已发布口径：候选是否入库、归到哪个组，都由当前版本决定（不读草稿）
+    published = ruleset_service.current_versions(db)
+    live_codes = {
+        group.code
+        for group in groups.values()
+        if published.get(str(group.id)) is not None and published[str(group.id)].enabled
+    }
     existing_ids = {row[0] for row in db.execute(select(Mention.external_id)).all()}
     existing_hashes = {
         hash_key(row[0], row[1], row[2])
@@ -41,11 +49,12 @@ def run_collection(db: Session, user: User, trace_id: str = "") -> dict:
     skipped_groups: list[str] = []
     new_mentions: list[Mention] = []
 
+    kept_candidates: dict[str, dict] = {}
     for item in inbox_corpus():
         if item["group_code"] not in groups:
             continue
         group = groups[item["group_code"]]
-        if not group.enabled:
+        if group.code not in live_codes:
             skipped_groups.append(group.code)
             continue
         scanned += 1
@@ -55,29 +64,54 @@ def run_collection(db: Session, user: User, trace_id: str = "") -> dict:
             duplicates += 1
             duplicate_reasons[reason] = duplicate_reasons.get(reason, 0) + 1
             continue
-
-        mention = Mention(
-            external_id=item["external_id"],
-            group_id=group.id,
-            brand_key=group.brand_key,
-            source_code=item["source_code"],
-            title=item["title"],
-            body=item["body"],
-            author=item["author"],
-            author_followers=item["author_followers"],
-            url=item["url"],
-            engagement=item["engagement"],
-            published_at=item["published_at"],
-            fetched_at=utcnow(),
-            content_hash=item["content_hash"],
-        )
-        db.add(mention)
-        new_mentions.append(mention)
+        kept_candidates[item["external_id"]] = item
         existing_ids.add(item["external_id"])
         existing_hashes.add(key)
-        inserted += 1
-        per_source[item["source_code"]] = per_source.get(item["source_code"], 0) + 1
-        per_group[group.code] = per_group.get(group.code, 0) + 1
+
+    # 已发布口径决定归属：主关键词/同义词都在当前版本里；排除词命中 → 不入库（记为排除）
+    excluded = 0
+    versions = ruleset_service.version_map(db)
+    if kept_candidates:
+        brand_groups = {str(group.id): group for group in groups.values() if group.code in live_codes}
+        _, rules = ruleset_service.live_rules(db)
+        index = ruleset_service._brand_index(brand_groups, rules)
+        for item in kept_candidates.values():
+            hit = ruleset_service.attribute(
+                {"title": item["title"], "body": item["body"], "brand_key": item["brand_key"]}, index
+            )
+            matched = bool(
+                hit is not None
+                and hit.get("reason") in ("matched", "retrieved")
+                and hit.get("group_id")
+            )
+            group = next((g for gid, g in brand_groups.items() if gid == (hit or {}).get("group_id")), None)
+            if group is None:
+                group = groups[item["group_code"]]
+            mention = Mention(
+                external_id=item["external_id"],
+                group_id=group.id,
+                brand_key=item["brand_key"],
+                source_code=item["source_code"],
+                title=item["title"],
+                body=item["body"],
+                author=item["author"],
+                author_followers=item["author_followers"],
+                url=item["url"],
+                engagement=item["engagement"],
+                published_at=item["published_at"],
+                fetched_at=utcnow(),
+                content_hash=item["content_hash"],
+            )
+            db.add(mention)
+            db.flush()
+            ruleset_service.write_attribution(db, mention=mention, hit=hit, version_by_group=versions)
+            if not matched:
+                excluded += 1
+                continue
+            new_mentions.append(mention)
+            inserted += 1
+            per_source[item["source_code"]] = per_source.get(item["source_code"], 0) + 1
+            per_group[group.code] = per_group.get(group.code, 0) + 1
 
     db.flush()
     distribution = {"pos": 0, "neu": 0, "neg": 0}
@@ -109,6 +143,12 @@ def run_collection(db: Session, user: User, trace_id: str = "") -> dict:
         "inserted": inserted,
         "duplicates": duplicates,
         "duplicate_reasons": duplicate_reasons,
+        "excluded": excluded,
+        "ruleset_versions": {
+            group.code: versions[str(group.id)].version
+            for group in groups.values()
+            if str(group.id) in versions
+        },
         "distribution": distribution,
         "per_source": [
             {"code": code, "label": SOURCE_LABELS.get(code, code), "count": count}
@@ -127,7 +167,11 @@ def run_collection(db: Session, user: User, trace_id: str = "") -> dict:
         actor=user,
         entity_type="collect_run",
         entity_id=f"run-{int(time.time())}",
-        detail={key: report[key] for key in ("scanned", "inserted", "duplicates", "total_mentions", "elapsed_ms")},
+        detail={
+            **{key: report[key] for key in ("scanned", "inserted", "duplicates", "total_mentions", "elapsed_ms")},
+            "excluded": excluded,
+            "ruleset_versions": report["ruleset_versions"],
+        },
         trace_id=trace_id,
     )
     db.commit()

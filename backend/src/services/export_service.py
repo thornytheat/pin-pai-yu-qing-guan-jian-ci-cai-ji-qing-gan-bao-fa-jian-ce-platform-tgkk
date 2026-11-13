@@ -16,6 +16,7 @@ from src.constants.log_templates import ACTION_EXPORT_DAILY
 from src.models.burst_alert import BurstAlert
 from src.models.keyword_group import KeywordGroup
 from src.models.mention import Mention
+from src.models.rule_version import MentionRuleAttribution
 from src.models.sentiment_score import SentimentScore
 from src.models.user import User
 from src.services import audit_service
@@ -43,11 +44,13 @@ def build_daily_report(db: Session, brand_scope: str | None) -> dict:
     neg_stmt = (
         select(Mention, SentimentScore, KeywordGroup)
         .join(SentimentScore, SentimentScore.mention_id == Mention.id)
-        .join(KeywordGroup, KeywordGroup.id == Mention.group_id)
+        .join(MentionRuleAttribution, MentionRuleAttribution.mention_id == Mention.id)
+        .join(KeywordGroup, KeywordGroup.id == MentionRuleAttribution.group_id)
         .where(
             Mention.published_at >= start,
             Mention.published_at < end,
             SentimentScore.final_label == "neg",
+            MentionRuleAttribution.kept.is_(True),
         )
         .order_by(SentimentScore.score.asc(), Mention.engagement.desc())
         .limit(EXPORT_TOP_NEGATIVE)
@@ -60,8 +63,14 @@ def build_daily_report(db: Session, brand_scope: str | None) -> dict:
 
     dist_stmt = (
         select(SentimentScore.final_label, func.count())
-        .join(Mention, Mention.id == SentimentScore.mention_id)
-        .where(Mention.published_at >= start, Mention.published_at < end)
+        .select_from(MentionRuleAttribution)
+        .join(Mention, Mention.id == MentionRuleAttribution.mention_id)
+        .join(SentimentScore, SentimentScore.mention_id == Mention.id)
+        .where(
+            Mention.published_at >= start,
+            Mention.published_at < end,
+            MentionRuleAttribution.kept.is_(True),
+        )
         .group_by(SentimentScore.final_label)
     )
     if brand_scope:
@@ -81,9 +90,15 @@ def build_daily_report(db: Session, brand_scope: str | None) -> dict:
 
     group_stmt = (
         select(KeywordGroup, SentimentScore.final_label, func.count())
-        .join(Mention, Mention.group_id == KeywordGroup.id)
+        .select_from(MentionRuleAttribution)
+        .join(Mention, Mention.id == MentionRuleAttribution.mention_id)
+        .join(KeywordGroup, KeywordGroup.id == MentionRuleAttribution.group_id)
         .join(SentimentScore, SentimentScore.mention_id == Mention.id)
-        .where(Mention.published_at >= start, Mention.published_at < end)
+        .where(
+            Mention.published_at >= start,
+            Mention.published_at < end,
+            MentionRuleAttribution.kept.is_(True),
+        )
         .group_by(KeywordGroup.id, SentimentScore.final_label)
     )
     if brand_scope:

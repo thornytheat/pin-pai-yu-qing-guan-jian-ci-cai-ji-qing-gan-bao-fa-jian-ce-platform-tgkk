@@ -25,6 +25,10 @@ def detail(db: Session, alert_id: str, user: User) -> dict:
     return burst_service.detail(db, alert_id, brand_scope(user))
 
 
+def versioned(db: Session, user: User) -> dict:
+    return burst_service.versioned_alerts(db, brand_scope(user))
+
+
 def claim(db: Session, alert_id: str, user: User, trace_id: str = "") -> dict:
     return burst_service.claim(db, alert_id, user, brand_scope(user), trace_id)
 

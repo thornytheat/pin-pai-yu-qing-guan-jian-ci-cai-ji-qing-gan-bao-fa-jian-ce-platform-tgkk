@@ -3,17 +3,32 @@
     <PageHeader
       kicker="keyword groups · synonyms · excludes"
       title="关键词组与词典"
-      :description="`${store.totals.groups} 组关键词覆盖 ${meta.brands.length} 个品牌；同义词扩召回，排除词去噪声。改完可先「试算召回」再保存。`"
+      :description="`${store.totals.groups} 组关键词覆盖 ${meta.brands.length} 个品牌。修改先存草稿，用同一批候选新旧对照后再一次性发布；线上版本 ${liveLabel}，历史预警保留原版本。`"
     >
       <template #actions>
         <button v-if="canWrite" class="btn" data-test="new-group" @click="startCreate">新建组</button>
-        <button v-if="canTrial" class="btn" :disabled="!form.keywords.length" data-test="trial" @click="runTrial">试算召回</button>
-        <button v-if="canWrite" class="btn btn--amber" :disabled="store.saving" data-test="save-group" @click="save">保存修改</button>
+        <button v-if="canTrial" class="btn" :disabled="!form.keywordsText.trim()" data-test="trial" @click="runTrial">试算召回</button>
+        <button v-if="canWrite" class="btn" :disabled="ruleset.saving" data-test="save-draft" @click="saveDraft">存为草稿</button>
+        <button
+          v-if="canTrial"
+          class="btn"
+          :disabled="!ruleset.draft || ruleset.loading"
+          data-test="diff-preview"
+          @click="previewDiff"
+        >新旧对照预演</button>
+        <button
+          v-if="canPublish"
+          class="btn btn--amber"
+          :disabled="!ruleset.draft || ruleset.draft.status === 'published' || ruleset.publishing"
+          data-test="publish-draft"
+          @click="publish"
+        >{{ ruleset.publishing ? '发布中…' : '一次性发布' }}</button>
       </template>
     </PageHeader>
 
     <ErrorNotice v-if="store.error" :message="store.error" :retry="false" @retry="() => {}" />
-    <div v-if="store.flash" class="flash rise">{{ store.flash }}</div>
+    <ErrorNotice v-if="ruleset.error" :message="ruleset.error" :retry="false" @retry="() => {}" />
+    <div v-if="ruleset.flash || store.flash" class="flash rise">{{ ruleset.flash || store.flash }}</div>
 
     <div class="grid">
       <aside class="list">
@@ -45,6 +60,17 @@
             <h2 class="editor__title">{{ creating ? '新建关键词组' : form.name || '（未命名）' }}</h2>
           </div>
           <span class="mono editor__code">{{ creating ? form.code || 'draft' : form.code }}</span>
+        </div>
+
+        <div class="livebar">
+          <span class="livebar__tag mono">线上 v{{ liveVersion || '—' }}</span>
+          <span class="livebar__meta mono">
+            {{ liveStartedAt ? `自 ${liveStartedAt}` : '尚未发布' }}
+            <em v-if="livePublisher"> · {{ livePublisher }}</em>
+          </span>
+          <span class="livebar__draft mono" :class="{ 'is-dirty': dirty }">
+            {{ dirty ? '有未发布的改动' : '与线上一致' }}
+          </span>
         </div>
 
         <div class="form-grid">
@@ -139,6 +165,123 @@
           <p class="trial__note">{{ store.trial.corpus_note }}</p>
         </section>
 
+        <section v-if="ruleset.diff" class="preview">
+          <RulesetDiffPanel :result="ruleset.diff" />
+          <div v-if="canPublish" class="preview__actions">
+            <label class="fld fld--wide">
+              <span class="label">发布说明（写入审计）</span>
+              <input v-model="publishReason" class="field" placeholder="如：补充「塑料片」同义词，z 阈值不变" data-test="publish-reason" />
+            </label>
+            <button
+              class="btn btn--amber"
+              :disabled="!ruleset.draft || ruleset.draft.status === 'published' || ruleset.publishing"
+              data-test="publish-confirm"
+              @click="publish"
+            >确认一次性发布 {{ changedCount }} 组</button>
+          </div>
+        </section>
+
+        <section v-if="ruleset.publishResult" class="publish" data-test="publish-result">
+          <div class="publish__head">
+            <span class="eyebrow">发布结果</span>
+            <span class="mono publish__meta">{{ ruleset.publishResult.published_at?.slice(0, 19) }}</span>
+          </div>
+          <p class="publish__line">
+            {{ ruleset.publishResult.idempotent ? '同一草稿重复发布：复用已有版本，未新建版本、未重复统计。' : '已一次性发布；采集、提及归属、情感汇总与爆发预警现在都使用同一版本。' }}
+          </p>
+          <ul class="publish__versions">
+            <li
+              v-for="(version, code) in ruleset.publishResult.versions"
+              :key="code"
+              class="mono"
+              :class="{ 'is-unchanged': hasKey(ruleset.publishResult.unchanged_versions, code) && !hasKey(ruleset.publishResult.new_versions, code) }"
+            >
+              {{ code }} → v{{ version }}
+              <em v-if="hasKey(ruleset.publishResult.new_versions, code)">新版本</em>
+              <em v-else>未变，沿用</em>
+            </li>
+          </ul>
+          <p class="publish__note">历史提及与历史预警保留原版本（只对发布之后的新提及生效）。</p>
+        </section>
+
+        <section class="drafts">
+          <div class="drafts__head">
+            <span class="eyebrow">草稿与线上版本</span>
+            <span class="mono drafts__meta">
+              草稿 {{ ruleset.draftCount }} · 归属对齐 {{ ruleset.overview?.alignment.aligned ? '是' : '否' }}
+            </span>
+          </div>
+          <div class="drafts__cols">
+            <ul class="drafts__list">
+              <li
+                v-for="draft in ruleset.overview?.drafts ?? []"
+                :key="draft.id"
+                class="draft"
+                :class="{ 'is-on': draft.id === ruleset.draft?.id }"
+                @click="selectDraft(draft.id)"
+              >
+                <span class="draft__label">{{ draft.label }}</span>
+                <span class="mono draft__meta">
+                  {{ draft.status === 'published' ? '已发布' : '草稿' }} · {{ draft.items.length }} 组 ·
+                  {{ draft.updated_at?.slice(5, 16).replace('T', ' ') }}
+                </span>
+              </li>
+              <li v-if="!(ruleset.overview?.drafts ?? []).length" class="draft draft--empty">还没有草稿：改完点「存为草稿」</li>
+            </ul>
+            <div class="alignbox">
+              <div class="alignbox__row">
+                <span class="label">四环节同一口径</span>
+                <span class="mono" :class="ruleset.overview?.alignment.aligned ? 'ok' : 'bad'">
+                  {{ ruleset.overview?.alignment.aligned ? '已对齐' : '存在偏差' }}
+                </span>
+              </div>
+              <div class="alignbox__row mono">
+                提及 {{ ruleset.overview?.alignment.attributed ?? 0 }}/{{ ruleset.overview?.alignment.mentions ?? 0 }}
+                · 保留 {{ ruleset.overview?.alignment.kept ?? 0 }}
+              </div>
+              <div class="alignbox__row mono">
+                预警版本 {{ (ruleset.overview?.alignment.alert_versions ?? []).join(', ') || '—' }}
+              </div>
+              <div class="alignbox__row mono">
+                候选批次 {{ ruleset.overview?.batch.candidates ?? 0 }} 条
+                （窗口 {{ ruleset.overview?.batch.inbox ?? 0 }} / 库内 {{ ruleset.overview?.batch.stored ?? 0 }}）
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section v-if="ruleset.history" class="history" data-test="rule-history">
+          <div class="drafts__head">
+            <span class="eyebrow">版本历史（可追溯）</span>
+            <span class="mono drafts__meta">最近 {{ ruleset.history.items.length }} 条 · 发布 {{ ruleset.history.publishes.length }} 次</span>
+          </div>
+          <ul class="hist">
+            <li v-for="item in ruleset.history.items.slice(0, 10)" :key="item.id" class="hist__row">
+              <span class="mono hist__ver">v{{ item.version }}</span>
+              <span class="hist__code mono">{{ item.code }}</span>
+              <span class="hist__meta mono">
+                {{ item.started_at?.slice(0, 16).replace('T', ' ') }}
+                <em v-if="item.is_current" class="hist__cur">线上</em>
+                <em v-else-if="item.ended_at">被 v{{ item.parent_version ? item.version + 1 : item.version }} 取代</em>
+              </span>
+              <span class="hist__words">
+                {{ item.keywords.join(' / ') }}
+                <em v-if="item.excludes.length">⊘ {{ item.excludes.join(' / ') }}</em>
+              </span>
+            </li>
+          </ul>
+          <ul class="hist hist--log">
+            <li v-for="log in ruleset.history.publishes.slice(0, 6)" :key="log.id" class="hist__row">
+              <span class="mono" :class="log.outcome === 'failed' ? 'bad' : 'ok'">
+                {{ log.outcome === 'failed' ? '失败' : '成功' }}
+              </span>
+              <span class="hist__code mono">{{ log.content_hash.slice(0, 10) }}</span>
+              <span class="hist__meta mono">{{ log.created_at?.slice(0, 16).replace('T', ' ') }} · {{ log.actor_email }}</span>
+              <span class="hist__words">{{ log.outcome_text }}</span>
+            </li>
+          </ul>
+        </section>
+
         <section class="dictionary">
           <div class="dict__head">
             <span class="eyebrow">情感词典（只读 · 后端唯一事实源）</span>
@@ -178,24 +321,72 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import PageHeader from '../components/common/PageHeader.vue'
 import ErrorNotice from '../components/common/ErrorNotice.vue'
+import RulesetDiffPanel from '../components/domain/RulesetDiffPanel.vue'
 import { useGroupStore } from '../stores/groupStore'
+import { useRulesetStore } from '../stores/rulesetStore'
 import { useMetaStore } from '../stores/metaStore'
 import { useAuthStore } from '../stores/authStore'
 import { fetchDictionary } from '../api/meta'
+import type { RulePatch } from '../api/ruleset'
 import type { DictionaryPayload } from '../types/domain'
 import { pct } from '../utils/format'
 
 const store = useGroupStore()
+const ruleset = useRulesetStore()
 const meta = useMetaStore()
 const auth = useAuthStore()
 
 const canWrite = computed(() => auth.can('groups:write'))
 const canTrial = computed(() => auth.can('groups:trial'))
+const canPublish = computed(() => auth.can('groups:publish'))
+const publishReason = ref('')
+
+const liveGroup = computed(() => {
+  if (creating.value || !form.id) return null
+  return ruleset.overview?.groups.find((item) => item.group_id === form.id) ?? null
+})
+const liveVersion = computed(() => liveGroup.value?.live_version ?? 0)
+const liveStartedAt = computed(() => liveGroup.value?.live_started_at?.slice(0, 16).replace('T', ' ') ?? '')
+const livePublisher = computed(() => liveGroup.value?.live_published_by ?? '')
+const liveLabel = computed(() => {
+  const versions = ruleset.overview?.groups.map((item) => `v${item.live_version}`) ?? []
+  return versions.length ? versions.join(' / ') : '—'
+})
+
+const draftRule = computed(() => ({
+  keywords: lines(form.keywordsText),
+  synonyms: lines(form.synonymsText),
+  excludes: lines(form.excludesText),
+  z_threshold: form.z_threshold,
+  min_count: form.min_count,
+  enabled: form.enabled,
+}))
+
+const dirty = computed(() => {
+  if (!liveGroup.value || creating.value) return false
+  const rule = liveGroup.value.rule
+  return (
+    JSON.stringify(rule.keywords) !== JSON.stringify(draftRule.value.keywords) ||
+    JSON.stringify(rule.synonyms) !== JSON.stringify(draftRule.value.synonyms) ||
+    JSON.stringify(rule.excludes) !== JSON.stringify(draftRule.value.excludes) ||
+    rule.z_threshold !== draftRule.value.z_threshold ||
+    rule.min_count !== draftRule.value.min_count ||
+    rule.enabled !== draftRule.value.enabled
+  )
+})
+
+const changedCount = computed(() => {
+  const result = ruleset.diff
+  if (!result) return 0
+  const olds = new Map(result.rules.old.map((item) => [item.group_id, item.hash]))
+  return result.rules.new.filter((item) => olds.get(item.group_id) !== item.hash).length
+})
 const dictionary = ref<DictionaryPayload | null>(null)
 const creating = ref(false)
 const pendingId = computed(() => store.selectedId)
 
 const form = reactive({
+  id: '',
   code: '',
   name: '',
   brand_key: 'coffee',
@@ -221,6 +412,7 @@ function syncForm() {
   const group = store.selected
   if (!group) return
   creating.value = false
+  form.id = group.id
   form.code = group.code
   form.name = group.name
   form.brand_key = group.brand_key
@@ -242,6 +434,7 @@ function selectGroup(id: string) {
 
 function startCreate() {
   creating.value = true
+  form.id = ''
   form.code = ''
   form.name = ''
   form.brand_key = 'coffee'
@@ -256,7 +449,22 @@ function startCreate() {
   form.owner_note = ''
 }
 
-async function save() {
+function currentChanges(): RulePatch[] {
+  if (!form.id) return []
+  return [
+    {
+      group_id: form.id,
+      keywords: lines(form.keywordsText),
+      synonyms: lines(form.synonymsText),
+      excludes: lines(form.excludesText),
+      z_threshold: form.z_threshold,
+      min_count: form.min_count,
+      enabled: form.enabled,
+    },
+  ]
+}
+
+async function saveDraft() {
   if (creating.value) {
     await store.create({
       code: form.code,
@@ -272,20 +480,48 @@ async function save() {
       owner_note: form.owner_note,
     })
     creating.value = false
+    await ruleset.load()
     syncForm()
     return
   }
-  await store.save({
-    name: form.name,
-    keywords: lines(form.keywordsText),
-    synonyms: lines(form.synonymsText),
-    excludes: lines(form.excludesText),
-    enabled: form.enabled,
-    priority: form.priority,
-    z_threshold: form.z_threshold,
-    min_count: form.min_count,
-    owner_note: form.owner_note,
+  if (!form.id) return
+  await ruleset.save({
+    label: `${form.name} ${new Date().toISOString().slice(5, 16).replace('T', ' ')}`,
+    changes: currentChanges(),
   })
+}
+
+async function previewDiff() {
+  await ruleset.runDiff()
+}
+
+async function publish() {
+  const result = await ruleset.publish(publishReason.value || '发布关键词规则修改')
+  if (result) {
+    publishReason.value = ''
+    await store.load()
+    syncForm()
+  }
+}
+
+function hasKey(record: Record<string, number> | undefined, key: string): boolean {
+  return Boolean(record && key in record)
+}
+
+async function selectDraft(draftId: string) {
+  await ruleset.select(draftId)
+  const target = ruleset.draft?.items.find((item) => item.group_id === form.id)
+  if (target) {
+    form.keywordsText = target.rule.keywords.join('\n')
+    form.synonymsText = target.rule.synonyms.join('\n')
+    form.excludesText = target.rule.excludes.join('\n')
+    form.z_threshold = target.rule.z_threshold
+    form.min_count = target.rule.min_count
+    form.enabled = target.rule.enabled
+  }
+  if (ruleset.draft?.status === 'draft' && ruleset.draft.last_trial) {
+    ruleset.diff = ruleset.draft.last_trial
+  }
 }
 
 async function runTrial() {
@@ -300,6 +536,8 @@ async function runTrial() {
 onMounted(async () => {
   await meta.load()
   await store.load()
+  await ruleset.load()
+  await ruleset.loadHistory()
   syncForm()
   try {
     dictionary.value = await fetchDictionary()
@@ -310,6 +548,217 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+.livebar {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  border: 1px solid var(--rule-soft);
+  border-left: 2px solid var(--amber-dim);
+  background: color-mix(in oklch, var(--ground-2) 45%, var(--ground));
+  padding: 6px 9px;
+}
+.livebar__tag {
+  font-size: 10px;
+  color: var(--amber);
+}
+.livebar__meta {
+  font-size: 9.5px;
+  color: var(--ink-faint);
+}
+.livebar__meta em {
+  font-style: normal;
+}
+.livebar__draft {
+  margin-left: auto;
+  font-size: 9.5px;
+  color: var(--ink-faint);
+}
+.livebar__draft.is-dirty {
+  color: var(--amber);
+}
+.preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.preview__actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.preview__actions .fld {
+  flex: 1 1 280px;
+}
+.publish {
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--pos);
+  padding: 9px 12px;
+  background: color-mix(in oklch, var(--ground-2) 55%, var(--ground));
+}
+.publish__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.publish__meta {
+  font-size: 9px;
+  color: var(--ink-faint);
+}
+.publish__line {
+  font-size: 11px;
+  color: var(--ink-soft);
+  margin: 6px 0;
+}
+.publish__versions {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+}
+.publish__versions li {
+  font-size: 9.5px;
+  border: 1px solid var(--rule-soft);
+  padding: 1px 6px;
+  color: var(--amber);
+}
+.publish__versions li.is-unchanged {
+  color: var(--ink-faint);
+}
+.publish__versions li em {
+  font-style: normal;
+  margin-left: 4px;
+  font-size: 8.5px;
+  color: var(--ink-faint);
+}
+.publish__note {
+  font-size: 9px;
+  color: var(--ink-faint);
+  margin: 7px 0 0;
+}
+.drafts,
+.history {
+  border-top: 1px solid var(--rule);
+  padding-top: 9px;
+}
+.drafts__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 7px;
+}
+.drafts__meta {
+  font-size: 9px;
+  color: var(--ink-faint);
+}
+.drafts__cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  gap: 14px;
+}
+.drafts__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 168px;
+  overflow: auto;
+}
+.draft {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  padding: 4px 7px;
+  border-bottom: 1px solid var(--rule-soft);
+  border-left: 2px solid transparent;
+  cursor: pointer;
+}
+.draft:hover {
+  background: color-mix(in oklch, var(--ground-3) 50%, var(--ground));
+}
+.draft.is-on {
+  border-left-color: var(--amber);
+  background: color-mix(in oklch, var(--ground-3) 75%, var(--ground));
+}
+.draft__label {
+  font-size: 11.5px;
+  color: var(--ink);
+}
+.draft__meta {
+  font-size: 9px;
+  color: var(--ink-faint);
+}
+.draft--empty {
+  font-size: 10px;
+  color: var(--ink-faint);
+  cursor: default;
+}
+.alignbox {
+  border: 1px solid var(--rule-soft);
+  padding: 7px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.alignbox__row {
+  font-size: 9.5px;
+  color: var(--ink-faint);
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ok {
+  color: var(--pos);
+}
+.bad {
+  color: var(--neg);
+}
+.hist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.hist__row {
+  display: grid;
+  grid-template-columns: 42px 104px minmax(0, 1fr);
+  gap: 0 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--rule-soft);
+  font-size: 9.5px;
+  color: var(--ink-faint);
+}
+.hist__ver {
+  color: var(--amber-dim);
+}
+.hist__code {
+  color: var(--ink-soft);
+}
+.hist__meta em {
+  font-style: normal;
+  margin-left: 6px;
+}
+.hist__cur {
+  color: var(--pos);
+}
+.hist__words {
+  grid-column: 3;
+  font-size: 9px;
+  color: var(--ink-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hist__words em {
+  font-style: normal;
+  color: var(--neg);
+  margin-left: 6px;
+}
+.hist--log {
+  margin-top: 7px;
+}
 .page {
   display: flex;
   flex-direction: column;
@@ -591,6 +1040,15 @@ onMounted(async () => {
   }
 }
 @media (max-width: 900px) {
+  .drafts__cols {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .hist__row {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+  .hist__words {
+    grid-column: 2;
+  }
   .grid {
     grid-template-columns: minmax(0, 1fr);
   }

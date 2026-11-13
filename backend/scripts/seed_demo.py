@@ -21,9 +21,11 @@ from src.constants.sources import SOURCE_CATALOG
 from src.models.burst_alert import BurstAlert
 from src.models.keyword_group import KeywordGroup
 from src.models.mention import Mention
+from src.models.rule_version import MentionRuleAttribution
 from src.models.sentiment_score import SentimentScore
 from src.models.user import User
 from src.services.analysis.sentiment_analyzer import analyze
+from src.services import ruleset_service
 from src.services.burst_service import run_detection
 from src.utils.password import hash_password
 from scripts import fixtures
@@ -192,6 +194,10 @@ def seed_all() -> dict[str, Any]:
         db.flush()
 
         admin = users[ROLE_ADMIN]
+        # 规则版本 v1 = seed 的关键词组字段；提及归属按同一口径落库（四个环节同一发布口径）
+        ruleset_service.seed_versions(db, actor_email=admin.email)
+        ruleset_service.seed_attributions(db)
+        db.flush()
         detection = run_detection(db, admin, None)
         db.flush()
 
@@ -229,6 +235,14 @@ def seed_all() -> dict[str, Any]:
             flush=True,
         )
         print(f"SEED_ALGO sentiment=1.0.0 burst={detection['algorithm_version']} eval_day={detection['eval_day']}", flush=True)
+        versions = ruleset_service.current_versions(db)
+        attributed = int(db.execute(select(func.count(MentionRuleAttribution.id))).scalar_one())
+        print(
+            "SEED_RULESET "
+            + f"groups={len(versions)} max_version={max((row.version for row in versions.values()), default=0)} "
+            + f"attributed={attributed}",
+            flush=True,
+        )
         print(format_summary(counts), flush=True)
         return {
             "created": CREATED,

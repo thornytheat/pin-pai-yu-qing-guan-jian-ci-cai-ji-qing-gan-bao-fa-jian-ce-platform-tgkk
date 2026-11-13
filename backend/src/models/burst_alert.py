@@ -1,6 +1,7 @@
 """BurstAlert：关键词组×小时桶的爆发事件（实体 4/4）。
 
-自然键 = (group_id, window_start)，重复检测只更新指标不新建。
+自然键 = (group_id, window_start, ruleset_version)：同一规则版本内重复检测只更新指标不新建；
+规则发布后新检测产生新版本事件，历史预警保留原版本（不被覆盖、不被追溯修改）。
 """
 from __future__ import annotations
 
@@ -18,7 +19,9 @@ from src.models.base import Base, TimestampMixin, new_uuid
 class BurstAlert(Base, TimestampMixin):
     __tablename__ = "burst_alerts"
     __table_args__ = (
-        UniqueConstraint("group_id", "window_start", name="uq_burst_group_window"),
+        UniqueConstraint(
+            "group_id", "window_start", "ruleset_version", name="uq_burst_group_window_version"
+        ),
         {"schema": settings.db_schema},
     )
 
@@ -47,5 +50,12 @@ class BurstAlert(Base, TimestampMixin):
     disposition_note: Mapped[str] = mapped_column(Text, nullable=False, default="")
     disposed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     detection_version: Mapped[str] = mapped_column(String(20), nullable=False, default="burst-1.0.0")
+    ruleset_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
+    ruleset_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(f"{settings.db_schema}.ruleset_versions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     group = relationship("KeywordGroup", lazy="joined")

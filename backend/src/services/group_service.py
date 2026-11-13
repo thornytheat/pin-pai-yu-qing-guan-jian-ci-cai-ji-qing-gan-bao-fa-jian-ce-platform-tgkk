@@ -15,42 +15,67 @@ from src.constants.enums import BRAND_LABELS
 from src.constants.log_templates import ACTION_GROUP_CREATE, ACTION_GROUP_TRIAL, ACTION_GROUP_UPDATE
 from src.models.keyword_group import KeywordGroup
 from src.models.mention import Mention
+from src.models.rule_version import MentionRuleAttribution
 from src.models.sentiment_score import SentimentScore
 from src.models.user import User
 from src.schemas.group import GroupCreateRequest, GroupTrialRequest, GroupUpdateRequest
-from src.services import audit_service
+from src.services import audit_service, ruleset_service
 from src.services.analysis.sentiment_analyzer import analyze_keyword_recall
 from src.services.fixtures_loader import inbox_corpus
 from src.utils.errors import AppError
 
 
 def _stats(db: Session, anchor) -> dict[str, dict]:
-    totals = dict(db.execute(select(Mention.group_id, func.count(Mention.id)).group_by(Mention.group_id)).all())
+    # 分组统计口径 = 已发布归属（与提及流/汇总一致），被排除或未命中的提及不计入。
+    kept = (
+        select(MentionRuleAttribution.group_id, func.count(Mention.id))
+        .select_from(MentionRuleAttribution)
+        .join(Mention, Mention.id == MentionRuleAttribution.mention_id)
+        .where(MentionRuleAttribution.kept.is_(True))
+        .group_by(MentionRuleAttribution.group_id)
+    )
+    totals = dict(db.execute(kept).all())
+    negative_base = (
+        select(MentionRuleAttribution.group_id, func.count(SentimentScore.id))
+        .select_from(MentionRuleAttribution)
+        .join(Mention, Mention.id == MentionRuleAttribution.mention_id)
+        .join(SentimentScore, SentimentScore.mention_id == Mention.id)
+    )
     negatives = dict(
         db.execute(
-            select(Mention.group_id, func.count(SentimentScore.id))
-            .join(SentimentScore, SentimentScore.mention_id == Mention.id)
-            .where(SentimentScore.final_label == "neg")
-            .group_by(Mention.group_id)
+            negative_base.where(
+                SentimentScore.final_label == "neg",
+                MentionRuleAttribution.kept.is_(True),
+            ).group_by(MentionRuleAttribution.group_id)
         ).all()
     )
     neus = dict(
         db.execute(
-            select(Mention.group_id, func.count(SentimentScore.id))
-            .join(SentimentScore, SentimentScore.mention_id == Mention.id)
-            .where(SentimentScore.final_label == "neu")
-            .group_by(Mention.group_id)
+            negative_base.where(
+                SentimentScore.final_label == "neu",
+                MentionRuleAttribution.kept.is_(True),
+            ).group_by(MentionRuleAttribution.group_id)
         ).all()
     )
-    latest = dict(db.execute(select(Mention.group_id, func.max(Mention.published_at)).group_by(Mention.group_id)).all())
+    latest = dict(
+        db.execute(
+            select(MentionRuleAttribution.group_id, func.max(Mention.published_at))
+            .select_from(MentionRuleAttribution)
+            .join(Mention, Mention.id == MentionRuleAttribution.mention_id)
+            .where(MentionRuleAttribution.kept.is_(True))
+            .group_by(MentionRuleAttribution.group_id)
+        ).all()
+    )
     recent: dict = {}
     if anchor is not None:
         cutoff = anchor - timedelta(hours=24)
         recent = dict(
             db.execute(
-                select(Mention.group_id, func.count(Mention.id))
-                .where(Mention.published_at >= cutoff)
-                .group_by(Mention.group_id)
+                select(MentionRuleAttribution.group_id, func.count(Mention.id))
+                .select_from(MentionRuleAttribution)
+                .join(Mention, Mention.id == MentionRuleAttribution.mention_id)
+                .where(MentionRuleAttribution.kept.is_(True), Mention.published_at >= cutoff)
+                .group_by(MentionRuleAttribution.group_id)
             ).all()
         )
     return {"totals": totals, "negatives": negatives, "neus": neus, "latest": latest, "recent": recent}
@@ -145,6 +170,8 @@ def create_group(db: Session, payload: GroupCreateRequest, user: User, trace_id:
     )
     db.add(group)
     db.flush()
+    # 新建组立即发布 v1：它只含本组规则，不会改变其他组已发布的版本。
+    ruleset_service.ensure_baseline(db, group, actor_email=user.email, reason="group_create")
     audit_service.record(
         db,
         action=ACTION_GROUP_CREATE,
@@ -159,6 +186,11 @@ def create_group(db: Session, payload: GroupCreateRequest, user: User, trace_id:
 
 
 def update_group(db: Session, group_id: str, payload: GroupUpdateRequest, user: User, trace_id: str = "") -> dict:
+    """直接改库接口：只维护 KeywordGroup 可读快照，不再作为线上口径入口。
+
+    线上口径只由 `ruleset_service.publish` 推进；这里保留接口是为了兼容旧调用，
+    但规则字段的线上生效版本不变（需走草稿 → 对照 → 发布）。
+    """
     group = get_group(db, group_id)
     changed: dict = {}
     data = payload.model_dump(exclude_none=True)

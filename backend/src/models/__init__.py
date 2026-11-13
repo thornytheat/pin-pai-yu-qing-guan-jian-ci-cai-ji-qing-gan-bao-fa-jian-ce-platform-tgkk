@@ -4,6 +4,12 @@ from src.models.base import Base
 from src.models.burst_alert import BurstAlert
 from src.models.keyword_group import KeywordGroup
 from src.models.mention import Mention
+from src.models.rule_version import (
+    MentionRuleAttribution,
+    RulesetDraft,
+    RulesetPublishLog,
+    RulesetVersion,
+)
 from src.models.sentiment_score import SentimentScore
 from src.models.user import User
 
@@ -13,6 +19,10 @@ __all__ = [
     "BurstAlert",
     "KeywordGroup",
     "Mention",
+    "MentionRuleAttribution",
+    "RulesetDraft",
+    "RulesetPublishLog",
+    "RulesetVersion",
     "SentimentScore",
     "User",
 ]

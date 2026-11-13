@@ -85,7 +85,10 @@
               <li v-for="alert in detail.alerts" :key="alert.id" class="alerts__item">
                 <LevelTag :level="alert.level" />
                 <span class="mono alerts__z">z={{ alert.z_score.toFixed(2) }}</span>
-                <span class="mono alerts__meta">{{ dateTime(alert.window_start) }} · 量 {{ alert.count }} · {{ alert.status }}</span>
+                <span class="mono alerts__meta">
+                  {{ dateTime(alert.window_start) }} · 量 {{ alert.count }} · {{ alert.status }}
+                  <em v-if="alert.ruleset_version" class="alerts__ver">规则 v{{ alert.ruleset_version }}</em>
+                </span>
                 <RouterLink to="/bursts" class="alerts__link mono">看板 →</RouterLink>
               </li>
             </ul>
@@ -267,6 +270,11 @@ watch(() => route.params.id, reload)
 </script>
 
 <style scoped>
+.alerts__ver {
+  font-style: normal;
+  color: var(--amber-dim);
+  margin-left: 5px;
+}
 .page {
   display: flex;
   flex-direction: column;

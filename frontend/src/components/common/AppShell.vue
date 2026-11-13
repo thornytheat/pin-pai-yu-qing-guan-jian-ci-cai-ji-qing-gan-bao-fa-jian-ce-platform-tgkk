@@ -51,8 +51,9 @@
         <div class="topbar__right">
           <span class="topbar__live"><i class="led-live" />LIVE</span>
           <span class="topbar__clock mono">{{ clockText }}</span>
-          <span class="topbar__algo mono">
+          <span class="topbar__algo mono" :title="rulesetTitle">
             {{ algorithms?.sentiment.version ?? '—' }} · {{ algorithms?.burst.version ?? '—' }}
+            · rules v{{ meta.payload?.ruleset.max_version ?? 0 }}
           </span>
         </div>
       </header>
@@ -89,6 +90,10 @@ const dayText = computed(() => dayLabel(now.value.toISOString()))
 const clockText = computed(() => clockLabel(now.value.toISOString()))
 const roleLabel = computed(() => ROLE_LABELS[auth.role] ?? auth.role)
 const algorithms = computed(() => meta.algorithms)
+const rulesetTitle = computed(() => {
+  const versions = meta.payload?.ruleset.versions ?? []
+  return versions.length ? versions.map((item) => `${item.code} v${item.version}`).join(' / ') : '尚未发布规则版本'
+})
 
 const navItems = computed(() => [
   { to: '/mentions', num: '壹', label: '提及流', meta: `${meta.counts.mentions}` },

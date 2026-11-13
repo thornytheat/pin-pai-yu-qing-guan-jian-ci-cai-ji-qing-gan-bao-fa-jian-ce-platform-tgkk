@@ -24,17 +24,27 @@ from src.constants.log_templates import ACTION_SENTIMENT_REVIEW
 from src.models.burst_alert import BurstAlert
 from src.models.keyword_group import KeywordGroup
 from src.models.mention import Mention
+from src.models.rule_version import MentionRuleAttribution
 from src.models.sentiment_score import SentimentScore
 from src.models.user import User
 from src.services import audit_service
 from src.utils.errors import AppError
+from src.services.ruleset_service import to_uuid
 from src.utils.textutils import snippet
 
 
 def _base_query(brand_scope: str | None):
-    stmt = select(Mention, SentimentScore, KeywordGroup).join(
-        SentimentScore, SentimentScore.mention_id == Mention.id
-    ).join(KeywordGroup, KeywordGroup.id == Mention.group_id)
+    """提及流只展示「当前发布口径下被保留」的提及；分组/归属取自已发布的归属结果。"""
+    stmt = (
+        select(Mention, SentimentScore, KeywordGroup)
+        .join(SentimentScore, SentimentScore.mention_id == Mention.id)
+        .join(MentionRuleAttribution, MentionRuleAttribution.mention_id == Mention.id)
+        .join(KeywordGroup, KeywordGroup.id == MentionRuleAttribution.group_id)
+        .where(
+            MentionRuleAttribution.kept.is_(True),
+            MentionRuleAttribution.group_id == Mention.group_id,
+        )
+    )
     if brand_scope:
         stmt = stmt.where(Mention.brand_key == brand_scope)
     return stmt
@@ -207,13 +217,10 @@ def _band(
 
 def get_mention(db: Session, mention_id: str, brand_scope: str | None) -> dict:
     row = db.execute(
-        select(Mention, SentimentScore, KeywordGroup)
-        .join(SentimentScore, SentimentScore.mention_id == Mention.id)
-        .join(KeywordGroup, KeywordGroup.id == Mention.group_id)
-        .where(Mention.id == mention_id)
+        _base_query(brand_scope).where(Mention.id == to_uuid(mention_id))
     ).first()
     if row is None:
-        raise AppError(codes.NOT_FOUND, "提及不存在", f"mention_id={mention_id}")
+        raise AppError(codes.NOT_FOUND, "该提及在当前发布口径下不存在", f"mention_id={mention_id}")
     mention, score, group = row
     if brand_scope and mention.brand_key != brand_scope:
         raise AppError(codes.BRAND_SCOPE_DENIED, "该数据不属于你负责的品牌", "brand mismatch")
@@ -221,8 +228,10 @@ def get_mention(db: Session, mention_id: str, brand_scope: str | None) -> dict:
     related_rows = db.execute(
         select(Mention, SentimentScore)
         .join(SentimentScore, SentimentScore.mention_id == Mention.id)
+        .join(MentionRuleAttribution, MentionRuleAttribution.mention_id == Mention.id)
         .where(
-            Mention.group_id == mention.group_id,
+            MentionRuleAttribution.kept.is_(True),
+            MentionRuleAttribution.group_id == mention.group_id,
             Mention.id != mention.id,
             Mention.published_at >= mention.published_at - timedelta(hours=2),
             Mention.published_at <= mention.published_at + timedelta(hours=2),
@@ -261,6 +270,7 @@ def get_mention(db: Session, mention_id: str, brand_scope: str | None) -> dict:
             "count": alert.count,
             "window_start": alert.window_start.isoformat(),
             "status": alert.status,
+            "ruleset_version": alert.ruleset_version,
         }
         for alert in alerts
     ]
@@ -278,13 +288,10 @@ def review(
     trace_id: str = "",
 ) -> dict:
     row = db.execute(
-        select(Mention, SentimentScore, KeywordGroup)
-        .join(SentimentScore, SentimentScore.mention_id == Mention.id)
-        .join(KeywordGroup, KeywordGroup.id == Mention.group_id)
-        .where(Mention.id == mention_id)
+        _base_query(brand_scope).where(Mention.id == to_uuid(mention_id))
     ).first()
     if row is None:
-        raise AppError(codes.NOT_FOUND, "提及不存在", f"mention_id={mention_id}")
+        raise AppError(codes.NOT_FOUND, "该提及在当前发布口径下不存在", f"mention_id={mention_id}")
     mention, score, group = row
     if brand_scope and mention.brand_key != brand_scope:
         raise AppError(codes.BRAND_SCOPE_DENIED, "该数据不属于你负责的品牌", "brand mismatch")

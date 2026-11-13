@@ -82,7 +82,7 @@
           <div class="event__name">{{ event.group_name }}</div>
           <div class="event__meta mono">
             量 {{ event.count }} · μ {{ event.baseline_mean.toFixed(2) }} · σ {{ event.baseline_std.toFixed(2) }} · z
-            {{ event.z_score.toFixed(2) }}
+            {{ event.z_score.toFixed(2) }} · 规则 v{{ event.ruleset_version }}
           </div>
           <div class="event__bar">
             <span :style="{ width: `${Math.min(100, (event.z_score / 8) * 100)}%` }" :class="`event__fill event__fill--${event.level}`" />
@@ -109,6 +109,15 @@
           <div><dt>标准差 σ</dt><dd class="mono">{{ detail.baseline_std.toFixed(3) }}</dd></div>
           <div><dt>z</dt><dd class="mono detail__z">{{ detail.z_score.toFixed(2) }}</dd></div>
           <div><dt>阈值</dt><dd class="mono">z&gt;{{ detail.thresholds.z }} / x≥{{ detail.thresholds.min_count }}</dd></div>
+          <div>
+            <dt>规则版本</dt>
+            <dd class="mono">
+              v{{ detail.ruleset_version }}
+              <em v-if="detail.ruleset_version_record && !detail.ruleset_version_record.is_current" class="detail__old">
+                历史版本（保留原口径）
+              </em>
+            </dd>
+          </div>
         </dl>
 
         <BurstTrend
@@ -269,6 +278,12 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+.detail__old {
+  font-style: normal;
+  color: var(--amber);
+  margin-left: 6px;
+  font-size: 9px;
+}
 .page {
   display: flex;
   flex-direction: column;
